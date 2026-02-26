@@ -49,6 +49,10 @@ use crate::{
     },
     service::{db, users},
 };
+#[cfg(feature = "enterprise")]
+use super::authz_provider::{
+    ExpandRelationsRequest, IsAllowedRequest, ListObjectsRequest, default_authz_provider,
+};
 
 pub const PKCE_STATE_ORG: &str = "o2_pkce_state";
 pub const ACCESS_TOKEN: &str = "access_token";
@@ -1071,6 +1075,10 @@ pub async fn validate_http_internal(req: &Request) -> Result<(), AuthError> {
     Ok(())
 }
 
+/// 使用统一的 AuthzProvider 在鉴权入口执行权限判定。
+///
+/// 该函数保留原有组织、角色和 root 用户分支逻辑，只把最终 `is_allowed`
+/// 调用改为 provider 分发，确保行为与旧实现一致。
 #[cfg(feature = "enterprise")]
 pub(crate) async fn check_permissions(
     user_id: &str,
@@ -1114,15 +1122,16 @@ pub(crate) async fn check_permissions(
         &auth_info.org_id
     };
 
-    o2_openfga::authorizer::authz::is_allowed(
-        org_id,
-        user_id,
-        &auth_info.method,
-        &obj_str,
-        &auth_info.parent_id,
-        &role.to_string(),
-    )
-    .await
+    default_authz_provider()
+        .is_allowed(IsAllowedRequest {
+            org_id,
+            user_id,
+            permission: &auth_info.method,
+            object: &obj_str,
+            parent: &auth_info.parent_id,
+            role: &role,
+        })
+        .await
 }
 
 #[cfg(not(feature = "enterprise"))]
@@ -1135,6 +1144,10 @@ pub(crate) async fn check_permissions(
     true
 }
 
+/// 通过 AuthzProvider 获取对象列表，并在有关系展开结果时优先使用展开结果。
+///
+/// Local provider 当前返回空关系集合，因此会自然回退到旧的 `list_objects` 路径，
+/// 从而保证行为不回退。
 #[cfg(feature = "enterprise")]
 async fn list_objects(
     user_id: &str,
@@ -1143,8 +1156,44 @@ async fn list_objects(
     org_id: &str,
     role: &str,
 ) -> Result<Vec<String>, anyhow::Error> {
-    o2_openfga::authorizer::authz::list_objects(user_id, permission, object_type, org_id, role)
+    let provider = default_authz_provider();
+    match provider
+        .expand_relations(ExpandRelationsRequest {
+            user_id,
+            permission,
+            object_type,
+            org_id,
+            role,
+        })
         .await
+    {
+        Ok(expanded_objects) if !expanded_objects.is_empty() => Ok(expanded_objects),
+        Ok(_) => {
+            provider
+                .list_objects(ListObjectsRequest {
+                    user_id,
+                    permission,
+                    object_type,
+                    org_id,
+                    role,
+                })
+                .await
+        }
+        Err(err) => {
+            log::debug!(
+                "AuthzProvider expand_relations failed, fallback to list_objects, err: {err}"
+            );
+            provider
+                .list_objects(ListObjectsRequest {
+                    user_id,
+                    permission,
+                    object_type,
+                    org_id,
+                    role,
+                })
+                .await
+        }
+    }
 }
 
 #[cfg(feature = "enterprise")]
