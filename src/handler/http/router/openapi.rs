@@ -202,6 +202,7 @@ use crate::{common::meta, handler::http::request};
         request::authz::fga::get_groups,
         request::authz::fga::get_group_details,
         request::authz::fga::delete_group,
+        request::authz::fga::simulate_permissions,
         request::keys::save,
         request::keys::get,
         request::keys::list,
