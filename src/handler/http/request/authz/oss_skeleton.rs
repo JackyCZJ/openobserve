@@ -164,6 +164,81 @@ fn collect_roles_for_user(store: &OssOrgAuthzStore, user_id: &str) -> (HashSet<S
     (direct_roles, inherited_roles)
 }
 
+/// 权限效果类型：仅区分允许与拒绝，供模拟器执行“deny 优先”判定。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PermissionEffect {
+    Allow,
+    Deny,
+}
+
+/// 将外部动作词统一映射到内部动作语义，避免 GET/POST/PATCH 等别名分散在匹配逻辑里。
+///
+/// 映射规则遵循“兼容优先”：
+/// - `GET/READ` 统一到 `read`
+/// - `POST/PUT/PATCH/WRITE` 统一到 `write`
+/// - `LIST/DELETE/ADMIN` 保持独立
+/// - 未知动作保留归一化后的原值，方便后续扩展。
+fn normalize_action_keyword(action: &str) -> String {
+    match normalize_name(action).as_str() {
+        "get" | "read" => "read".to_string(),
+        "post" | "put" | "patch" | "write" => "write".to_string(),
+        "list" => "list".to_string(),
+        "delete" => "delete".to_string(),
+        "admin" => "admin".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// 判断资源是否命中权限 scope，支持精确匹配、全局匹配与带边界的前缀匹配。
+///
+/// 边界前缀规则用于避免 `stream_prod` 误匹配 `stream_production`：
+/// 仅当资源以 `scope + "_"` 开头时才视为 scope 继承命中。
+fn matches_resource_scope(scope: &str, resource: &str) -> bool {
+    if scope == "*" || resource == "*" || scope == resource {
+        return true;
+    }
+    resource
+        .strip_prefix(scope)
+        .is_some_and(|suffix| suffix.starts_with('_'))
+}
+
+/// 将权限文本解析为动作匹配结果与权限效果，用于统一处理 allow/deny/历史动作写法。
+///
+/// 支持三类写法：
+/// - 全局效果：`allow` / `deny` / `*`
+/// - 显式动作效果：`allow_<action>` / `deny_<action>`
+/// - 历史动作写法：`get/post/patch/...`（默认按 allow 处理）
+fn resolve_permission_effect(permission: &str, request_action: &str) -> Option<PermissionEffect> {
+    let normalized_permission = normalize_name(permission);
+    let normalized_action = normalize_action_keyword(request_action);
+
+    match normalized_permission.as_str() {
+        "*" | "allow" => return Some(PermissionEffect::Allow),
+        "deny" => return Some(PermissionEffect::Deny),
+        _ => {}
+    }
+
+    if let Some(action) = normalized_permission.strip_prefix("allow_") {
+        if normalize_action_keyword(action) == normalized_action {
+            return Some(PermissionEffect::Allow);
+        }
+        return None;
+    }
+
+    if let Some(action) = normalized_permission.strip_prefix("deny_") {
+        if normalize_action_keyword(action) == normalized_action {
+            return Some(PermissionEffect::Deny);
+        }
+        return None;
+    }
+
+    if normalize_action_keyword(&normalized_permission) == normalized_action {
+        return Some(PermissionEffect::Allow);
+    }
+
+    None
+}
+
 /// OSS 角色创建最小实现：支持角色名和基础自定义权限保存。
 pub async fn create_role(org_id: String, user_req: UserRoleRequest) -> Response {
     let role_name = normalize_name(&user_req.role);
@@ -571,14 +646,29 @@ pub async fn delete_group_bulk(
 }
 
 /// OSS 权限模拟器最小实现：基于直接角色、组继承和权限项生成可解释决策链。
+///
+/// 执行顺序固定为：
+/// 1. 动作映射（HTTP 动词 -> 统一动作语义）
+/// 2. 主体关系收敛（直绑角色 + 组继承角色）
+/// 3. scope 匹配（精确/边界前缀/全局）
+/// 4. 冲突裁决（deny 优先覆盖 allow）
+///
+/// 该顺序保证调试时可以直接从 `decision_chain` 还原每一步决策依据。
 pub async fn simulate_permissions(org_id: String, req: PermissionSimulationRequest) -> Response {
     let subject = normalize_subject(&req.subject);
     let resource = normalize_name(&req.resource);
-    let action = normalize_name(&req.action);
+    let normalized_action = normalize_action_keyword(&req.action);
 
     let mut decision_chain = Vec::new();
+    decision_chain.push(PermissionSimulationStep {
+        stage: "action_mapping".to_string(),
+        decision: "mapped".to_string(),
+        reason: "将请求动作映射到统一动作语义，避免 GET/POST 等别名导致判定漂移".to_string(),
+        matched: vec![format!("{} -> {}", req.action, normalized_action)],
+    });
 
-    let (direct_roles, inherited_roles, matched_permissions) = with_org_store(&org_id, |store| {
+    let (direct_roles, inherited_roles, matched_allow_permissions, matched_deny_permissions) =
+        with_org_store(&org_id, |store| {
         if let Some(store) = store {
             let (direct_roles, inherited_roles) = collect_roles_for_user(store, &subject);
             let all_roles = direct_roles
@@ -587,40 +677,37 @@ pub async fn simulate_permissions(org_id: String, req: PermissionSimulationReque
                 .chain(inherited_roles.iter().cloned())
                 .collect::<HashSet<_>>();
 
-            let matched_permissions = all_roles
-                .iter()
-                .flat_map(|role| {
-                    store
-                        .roles
-                        .get(role)
-                        .map(|record| {
-                            record
-                                .permissions
-                                .iter()
-                                .filter_map(|permission| {
-                                    let resource_match = permission.object == "*"
-                                        || resource == "*"
-                                        || permission.object == resource
-                                        || resource.starts_with(&permission.object);
-                                    let action_match = permission.permission == "*"
-                                        || permission.permission.contains("allow")
-                                        || permission.permission == action;
+            let mut matched_allow_permissions = Vec::new();
+            let mut matched_deny_permissions = Vec::new();
+            for role in &all_roles {
+                if let Some(record) = store.roles.get(role) {
+                    for permission in &record.permissions {
+                        if !matches_resource_scope(&permission.object, &resource) {
+                            continue;
+                        }
+                        match resolve_permission_effect(&permission.permission, &normalized_action) {
+                            Some(PermissionEffect::Allow) => matched_allow_permissions.push(format!(
+                                "{role}:{}:{}",
+                                permission.object, permission.permission
+                            )),
+                            Some(PermissionEffect::Deny) => matched_deny_permissions.push(format!(
+                                "{role}:{}:{}",
+                                permission.object, permission.permission
+                            )),
+                            None => {}
+                        }
+                    }
+                }
+            }
 
-                                    if resource_match && action_match {
-                                        Some(format!("{role}:{}:{}", permission.object, permission.permission))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default()
-                })
-                .collect::<Vec<_>>();
-
-            (direct_roles, inherited_roles, matched_permissions)
+            (
+                direct_roles,
+                inherited_roles,
+                matched_allow_permissions,
+                matched_deny_permissions,
+            )
         } else {
-            (HashSet::new(), HashSet::new(), Vec::new())
+            (HashSet::new(), HashSet::new(), Vec::new(), Vec::new())
         }
     });
 
@@ -650,8 +737,10 @@ pub async fn simulate_permissions(org_id: String, req: PermissionSimulationReque
         matched: inherited_roles_sorted,
     });
 
-    let mut matched_permissions_sorted = matched_permissions;
-    matched_permissions_sorted.sort();
+    let mut matched_allow_permissions_sorted = matched_allow_permissions;
+    matched_allow_permissions_sorted.sort();
+    let mut matched_deny_permissions_sorted = matched_deny_permissions;
+    matched_deny_permissions_sorted.sort();
 
     let has_admin_role = direct_roles
         .iter()
@@ -668,17 +757,28 @@ pub async fn simulate_permissions(org_id: String, req: PermissionSimulationReque
     } else {
         decision_chain.push(PermissionSimulationStep {
             stage: "permission_match".to_string(),
-            decision: if matched_permissions_sorted.is_empty() {
+            decision: if matched_allow_permissions_sorted.is_empty() {
                 "miss".to_string()
             } else {
                 "hit".to_string()
             },
-            reason: "检查角色权限是否覆盖 resource + action".to_string(),
-            matched: matched_permissions_sorted.clone(),
+            reason: "检查角色是否命中 allow 权限".to_string(),
+            matched: matched_allow_permissions_sorted.clone(),
+        });
+        decision_chain.push(PermissionSimulationStep {
+            stage: "deny_priority".to_string(),
+            decision: if matched_deny_permissions_sorted.is_empty() {
+                "miss".to_string()
+            } else {
+                "hit".to_string()
+            },
+            reason: "若命中 deny 权限则覆盖 allow，确保拒绝策略优先".to_string(),
+            matched: matched_deny_permissions_sorted.clone(),
         });
     }
 
-    let allowed = has_admin_role || !matched_permissions_sorted.is_empty();
+    let allowed = has_admin_role
+        || (matched_deny_permissions_sorted.is_empty() && !matched_allow_permissions_sorted.is_empty());
     decision_chain.push(PermissionSimulationStep {
         stage: "final_decision".to_string(),
         decision: if allowed {
@@ -687,9 +787,13 @@ pub async fn simulate_permissions(org_id: String, req: PermissionSimulationReque
             "deny".to_string()
         },
         reason: if allowed {
-            "至少命中一条有效授权关系".to_string()
+            if has_admin_role {
+                "命中内置管理角色，直接放行".to_string()
+            } else {
+                "命中 allow 且未被 deny 覆盖".to_string()
+            }
         } else {
-            "未命中可用授权关系，默认拒绝".to_string()
+            "命中 deny 或未命中可用 allow，按默认拒绝返回".to_string()
         },
         matched: Vec::new(),
     });
@@ -847,5 +951,133 @@ mod tests {
         let roles: Vec<String> = read_json(resp).await;
         assert!(roles.contains(&"custom_reader".to_string()));
         assert!(roles.contains(&"custom_writer".to_string()));
+    }
+
+    #[test]
+    /// 验证动作映射会将历史 HTTP 动词统一到冻结动作语义，避免匹配歧义。
+    fn test_normalize_action_keyword_aliases() {
+        assert_eq!(normalize_action_keyword("GET"), "read");
+        assert_eq!(normalize_action_keyword("post"), "write");
+        assert_eq!(normalize_action_keyword("PATCH"), "write");
+        assert_eq!(normalize_action_keyword("LIST"), "list");
+        assert_eq!(normalize_action_keyword("DELETE"), "delete");
+    }
+
+    #[test]
+    /// 验证 scope 判定使用边界前缀规则，避免相似字符串产生误授权。
+    fn test_matches_resource_scope_with_boundary() {
+        assert!(matches_resource_scope("stream_team_a", "stream_team_a"));
+        assert!(matches_resource_scope("stream_team_a", "stream_team_a_logs"));
+        assert!(!matches_resource_scope("stream_team_a", "stream_team_ab"));
+        assert!(matches_resource_scope("*", "stream_team_ab"));
+    }
+
+    #[tokio::test]
+    /// 验证同一请求同时命中 allow 与 deny 时，最终决策必须是 deny。
+    async fn test_simulator_deny_takes_precedence_over_allow() {
+        reset_store();
+
+        let _ = create_role(
+            "org4".to_string(),
+            UserRoleRequest {
+                role: "custom_guard".to_string(),
+                custom: None,
+            },
+        )
+        .await;
+
+        let _ = update_role(
+            "org4".to_string(),
+            "custom_guard".to_string(),
+            OssRoleRequest {
+                add: vec![
+                    OssRolePermission {
+                        object: "stream/team/a".to_string(),
+                        permission: "allow_write".to_string(),
+                    },
+                    OssRolePermission {
+                        object: "stream/team/a".to_string(),
+                        permission: "deny_write".to_string(),
+                    },
+                ],
+                remove: vec![],
+                add_users: Some(HashSet::from(["dora@example.com".to_string()])),
+                remove_users: None,
+            },
+        )
+        .await;
+
+        let resp = simulate_permissions(
+            "org4".to_string(),
+            PermissionSimulationRequest {
+                subject: "dora@example.com".to_string(),
+                resource: "stream/team/a".to_string(),
+                action: "POST".to_string(),
+            },
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let payload: PermissionSimulationResponse = read_json(resp).await;
+        assert!(!payload.allowed);
+        assert_eq!(payload.decision, "deny");
+        assert!(payload
+            .decision_chain
+            .iter()
+            .any(|step| step.stage == "deny_priority" && step.decision == "hit"));
+    }
+
+    #[tokio::test]
+    /// 验证 scope 判定支持层级资源，并在边界不命中时正确返回 deny。
+    async fn test_simulator_scope_evaluation() {
+        reset_store();
+
+        let _ = create_role(
+            "org5".to_string(),
+            UserRoleRequest {
+                role: "scope_reader".to_string(),
+                custom: None,
+            },
+        )
+        .await;
+
+        let _ = update_role(
+            "org5".to_string(),
+            "scope_reader".to_string(),
+            OssRoleRequest {
+                add: vec![OssRolePermission {
+                    object: "stream/team/a".to_string(),
+                    permission: "allow_read".to_string(),
+                }],
+                remove: vec![],
+                add_users: Some(HashSet::from(["erin@example.com".to_string()])),
+                remove_users: None,
+            },
+        )
+        .await;
+
+        let scoped_hit = simulate_permissions(
+            "org5".to_string(),
+            PermissionSimulationRequest {
+                subject: "erin@example.com".to_string(),
+                resource: "stream/team/a/error".to_string(),
+                action: "GET".to_string(),
+            },
+        )
+        .await;
+        let scoped_hit_payload: PermissionSimulationResponse = read_json(scoped_hit).await;
+        assert!(scoped_hit_payload.allowed);
+
+        let scoped_miss = simulate_permissions(
+            "org5".to_string(),
+            PermissionSimulationRequest {
+                subject: "erin@example.com".to_string(),
+                resource: "stream/team/ab".to_string(),
+                action: "GET".to_string(),
+            },
+        )
+        .await;
+        let scoped_miss_payload: PermissionSimulationResponse = read_json(scoped_miss).await;
+        assert!(!scoped_miss_payload.allowed);
     }
 }
