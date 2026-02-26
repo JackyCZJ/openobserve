@@ -34,6 +34,7 @@ pub mod plan;
 pub mod projections;
 pub mod promql;
 pub mod ratelimit;
+pub mod rbac;
 pub mod search;
 pub mod self_reporting;
 pub mod service_graph;
