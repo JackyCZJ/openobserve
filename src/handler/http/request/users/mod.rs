@@ -17,7 +17,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     body::Body,
-    extract::{Path, Query},
+    extract::{Path, Query, Request},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -45,6 +45,7 @@ use crate::{
         meta::{
             self,
             http::HttpResponse as MetaHttpResponse,
+            token::TokenIntrospectionResponse,
             user::{
                 AuthTokens, PostUserRequest, RolesResponse, SignInResponse, SignInUser, UpdateUser,
                 UserOrgRole, UserRequest, UserRoleRequest, UserUpdateMode, get_roles,
@@ -53,6 +54,7 @@ use crate::{
         utils::auth::{UserEmail, generate_presigned_url, is_valid_email},
     },
     handler::http::{
+        auth::token_semantics::{extract_auth_from_request_headers, introspect_auth_token},
         extractors::Headers,
         request::{BulkDeleteRequest, BulkDeleteResponse},
     },
@@ -915,6 +917,57 @@ pub async fn get_auth(
             .body(Body::from("\"Not Supported\""))
             .unwrap()
     }
+}
+
+/// IntrospectToken
+#[utoipa::path(
+    get,
+    path = "/introspect",
+    context_path = "/auth",
+    tag = "Auth",
+    operation_id = "AuthTokenIntrospect",
+    summary = "Introspect token semantics",
+    description = "Returns minimal token introspection fields for compatibility migration, including token type, scope, and role source.",
+    security(
+        ("Authorization" = [])
+    ),
+    responses(
+        (status = 200, description = "Success", content_type = "application/json", body = inline(TokenIntrospectionResponse)),
+        (status = 401, description = "Unauthorized", content_type = "application/json", body = Object),
+    ),
+    extensions(
+        ("x-o2-mcp" = json!({"enabled": false}))
+    )
+)]
+/// 读取请求中的 Authorization 或 auth_tokens Cookie，并返回最小 token 自省结果。
+/// 该接口用于 M4 过渡期验证新语义，不改动现有鉴权主流程。
+pub async fn introspect_token(request: Request) -> Response {
+    let (parts, _body) = request.into_parts();
+    let auth_header = parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    let cookie_header = parts
+        .headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok());
+
+    let Some(auth) = extract_auth_from_request_headers(auth_header, cookie_header) else {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_string(&meta::http::HttpResponse::error(
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "Missing authentication token",
+                ))
+                .unwrap(),
+            ))
+            .unwrap();
+    };
+
+    let introspection = introspect_auth_token(&auth).await;
+    MetaHttpResponse::json(introspection)
 }
 
 /// ListUserRoles

@@ -660,6 +660,37 @@ pub struct Profiling {
     pub pyroscope_project_name: String,
 }
 
+/// 控制令牌语义解析策略的兼容模式。
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, Default)]
+pub enum TokenSemanticsMode {
+    #[default]
+    Legacy,
+    New,
+}
+
+impl TokenSemanticsMode {
+    /// 以稳定字符串形式输出模式值，便于 API 返回和日志标记。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::New => "new",
+        }
+    }
+}
+
+impl std::str::FromStr for TokenSemanticsMode {
+    type Err = &'static str;
+
+    /// 解析环境变量值；遇到未知值时回退为 legacy，保证默认流程不被破坏。
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "legacy" => Ok(Self::Legacy),
+            "new" => Ok(Self::New),
+            _ => Ok(Self::Legacy),
+        }
+    }
+}
+
 #[derive(Serialize, EnvConfig, Default)]
 pub struct Auth {
     #[env_config(name = "ZO_ROOT_USER_EMAIL")]
@@ -682,6 +713,8 @@ pub struct Auth {
     pub action_server_token: String,
     #[env_config(name = "ZO_SERVICE_ACCOUNT_ENABLED", default = true)]
     pub service_account_enabled: bool,
+    #[env_config(name = "ZO_TOKEN_SEMANTICS_MODE", parse, default = "legacy")]
+    pub token_semantics_mode: TokenSemanticsMode,
     /// Session cleanup interval in seconds (default: 3600 = 1 hour)
     /// How often to run the background job that deletes expired sessions
     #[env_config(name = "ZO_SESSION_CLEANUP_INTERVAL", default = 3600)]
