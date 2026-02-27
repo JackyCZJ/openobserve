@@ -29,6 +29,7 @@ use crate::{common::meta, handler::http::request};
         request::users::update,
         request::users::delete,
         request::users::add_user_to_org,
+        request::users::introspect_token,
         request::organization::org::organizations,
         request::organization::org::create_org,
         request::organization::org::rename_org,

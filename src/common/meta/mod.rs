@@ -27,5 +27,6 @@ pub mod service;
 pub mod service_account;
 pub mod stream;
 pub mod telemetry;
+pub mod token;
 pub mod traces;
 pub mod user;

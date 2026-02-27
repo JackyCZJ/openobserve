@@ -54,6 +54,8 @@ use super::authz_provider::{
     ExpandRelationsRequest, IsAllowedRequest, ListObjectsRequest, default_authz_provider,
 };
 
+use super::token_semantics::resolve_runtime_auth_context;
+
 pub const PKCE_STATE_ORG: &str = "o2_pkce_state";
 pub const ACCESS_TOKEN: &str = "access_token";
 pub const REFRESH_TOKEN: &str = "refresh_token";
@@ -870,17 +872,16 @@ async fn oo_validator_internal(
     auth_info: &AuthExtractor,
     path_prefix: &str,
 ) -> Result<AuthValidationResult, AuthError> {
-    // Check if this is a session-based auth (marked with Session:: prefix)
-    let (is_from_session, auth_str) = if let Some(rest) = auth_info.auth.strip_prefix("Session::") {
-        // Format: "Session::<session_id>::<actual_token>"
-        if let Some((_session_id, token)) = rest.split_once("::") {
-            (true, token.to_string())
-        } else {
-            (false, auth_info.auth.clone())
-        }
-    } else {
-        (false, auth_info.auth.clone())
-    };
+    // 通过可配置的 legacy/new 入口统一解析认证串，默认 legacy，避免影响现有行为。
+    let runtime_auth = resolve_runtime_auth_context(
+        get_config().auth.token_semantics_mode.clone(),
+        &auth_info.auth,
+    );
+    let is_from_session = runtime_auth.from_session;
+    let auth_str = runtime_auth.normalized_auth.clone();
+    let mut normalized_auth_info = auth_info.clone();
+    normalized_auth_info.auth = auth_str.clone();
+    normalized_auth_info.bypass_check = is_from_session || auth_info.bypass_check;
 
     if let Some(info) = auth_str.strip_prefix("Basic ").map(str::trim) {
         let decoded = match base64::decode(info) {
@@ -892,20 +893,17 @@ async fn oo_validator_internal(
             Some(value) => value,
             None => return Err(AuthError::Unauthorized("Unauthorized Access".to_string())),
         };
-        // Pass is_from_session flag through a modified auth_info
-        let mut modified_auth_info = auth_info.clone();
-        modified_auth_info.bypass_check = is_from_session || auth_info.bypass_check;
         validator(
             req_data,
             &username,
             &password,
-            &modified_auth_info,
+            &normalized_auth_info,
             path_prefix,
         )
         .await
     } else if auth_str.starts_with("Bearer") {
         log::debug!("Bearer token found");
-        super::token::token_validator(req_data, auth_info).await
+        super::token::token_validator(req_data, &normalized_auth_info).await
     } else if let Ok(auth_tokens) = config::utils::json::from_str::<AuthTokensExt>(&auth_info.auth)
     {
         log::debug!("Auth ext token found");
