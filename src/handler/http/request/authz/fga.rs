@@ -19,12 +19,11 @@ use axum::{Json, extract::Path, response::Response};
 #[cfg(feature = "enterprise")]
 use {crate::common::utils::auth::check_permissions, o2_dex::meta::auth::RoleRequest};
 
+#[cfg(feature = "enterprise")]
+use crate::common::meta::http::HttpResponse as MetaHttpResponse;
 use crate::{
     common::{
-        meta::{
-            http::HttpResponse as MetaHttpResponse,
-            user::{UserGroup, UserGroupRequest, UserRoleRequest},
-        },
+        meta::user::{UserGroup, UserGroupRequest, UserRoleRequest},
         utils::auth::UserEmail,
     },
     handler::http::{
@@ -111,10 +110,11 @@ pub async fn create_role(
     )
 )]
 pub async fn create_role(
-    Path(_org_id): Path<String>,
-    Json(_role_id): Json<UserRoleRequest>,
+    Path(org_id): Path<String>,
+    Json(role_req): Json<UserRoleRequest>,
 ) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+    // OSS 最小骨架：沿用 enterprise 路由与请求结构，将角色创建交给本地内存实现。
+    super::oss_skeleton::create_role(org_id, role_req).await
 }
 
 #[cfg(feature = "enterprise")]
@@ -245,11 +245,12 @@ pub async fn delete_role_bulk(
     )
 )]
 pub async fn delete_role_bulk(
-    Path(_path): Path<String>,
+    Path(org_id): Path<String>,
     Headers(_user_email): Headers<UserEmail>,
-    Json(_req): Json<BulkDeleteRequest>,
+    Json(req): Json<BulkDeleteRequest>,
 ) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+    // OSS 最小骨架：支持批量删除角色，便于前端对齐 enterprise 调用方式。
+    super::oss_skeleton::delete_role_bulk(org_id, req).await
 }
 
 #[cfg(not(feature = "enterprise"))]
@@ -277,8 +278,10 @@ pub async fn delete_role_bulk(
         ("x-o2-ratelimit" = json!({"module": "Roles", "operation": "delete"}))
     )
 )]
-pub async fn delete_role(Path(_path): Path<(String, String)>) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+pub async fn delete_role(Path(path): Path<(String, String)>) -> Response {
+    // OSS 最小骨架：开放角色删除接口，并同步清理内存中的关系。
+    let (org_id, role_name) = path;
+    super::oss_skeleton::delete_role(org_id, role_name).await
 }
 
 #[cfg(feature = "enterprise")]
@@ -373,8 +376,9 @@ pub async fn get_roles(
         ("x-o2-ratelimit" = json!({"module": "Roles", "operation": "list"}))
     )
 )]
-pub async fn get_roles(Path(_org_id): Path<String>) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+pub async fn get_roles(Path(org_id): Path<String>) -> Response {
+    // OSS 最小骨架：返回内置角色和当前组织自定义角色，保持路由语义一致。
+    super::oss_skeleton::get_roles(org_id).await
 }
 
 #[cfg(feature = "enterprise")]
@@ -439,16 +443,18 @@ pub async fn update_role(
         ("org_id" = String, Path, description = "Organization name"),
         ("role_id" = String, Path, description = "Role Id"),
     ),
+    request_body(content = inline(super::oss_skeleton::OssRoleRequest), description = "RoleRequest", content_type = "application/json"),
     responses(
         (status = 200, description = "Success", content_type = "application/json", body = Object),
         (status = 500, description = "Failure", content_type = "application/json", body = ()),
     )
 )]
 pub async fn update_role(
-    Path(_path): Path<(String, String)>,
-    Json(_permissions): Json<String>,
+    Path((org_id, role_id)): Path<(String, String)>,
+    Json(update_role): Json<super::oss_skeleton::OssRoleRequest>,
 ) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+    // OSS 最小骨架：保留 add/remove/add_users/remove_users 结构，便于后续平滑迁移。
+    super::oss_skeleton::update_role(org_id, role_id, update_role).await
 }
 
 #[cfg(feature = "enterprise")]
@@ -505,8 +511,9 @@ pub async fn get_role_permissions(
         (status = 500, description = "Failure", content_type = "application/json", body = ()),
     )
 )]
-pub async fn get_role_permissions(Path(_path): Path<(String, String, String)>) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+pub async fn get_role_permissions(Path((org_id, role_id, resource)): Path<(String, String, String)>) -> Response {
+    // OSS 最小骨架：返回角色权限项，支持按 resource 前缀进行基础过滤。
+    super::oss_skeleton::get_role_permissions(org_id, role_id, resource).await
 }
 
 #[cfg(feature = "enterprise")]
@@ -559,8 +566,9 @@ pub async fn get_users_with_role(Path((org_id, role_id)): Path<(String, String)>
         (status = 500, description = "Failure", content_type = "application/json", body = ()),
     )
 )]
-pub async fn get_users_with_role(Path(_path): Path<(String, String)>) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+pub async fn get_users_with_role(Path((org_id, role_id)): Path<(String, String)>) -> Response {
+    // OSS 最小骨架：返回角色直接绑定和组继承关联到的用户列表。
+    super::oss_skeleton::get_users_with_role(org_id, role_id).await
 }
 
 #[cfg(feature = "enterprise")]
@@ -612,8 +620,9 @@ pub async fn get_roles_for_user(Path((org_id, user_email)): Path<(String, String
         (status = 500, description = "Failure", content_type = "application/json", body = ()),
     )
 )]
-pub async fn get_roles_for_user(Path(_path): Path<(String, String)>) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+pub async fn get_roles_for_user(Path((org_id, user_email)): Path<(String, String)>) -> Response {
+    // OSS 最小骨架：聚合用户直接角色与组继承角色，返回统一角色列表。
+    super::oss_skeleton::get_roles_for_user(org_id, user_email).await
 }
 
 #[cfg(feature = "enterprise")]
@@ -666,8 +675,9 @@ pub async fn get_groups_for_user(Path((org_id, user_email)): Path<(String, Strin
         (status = 500, description = "Failure", content_type = "application/json", body = ()),
     )
 )]
-pub async fn get_groups_for_user(Path(_path): Path<(String, String)>) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+pub async fn get_groups_for_user(Path((org_id, user_email)): Path<(String, String)>) -> Response {
+    // OSS 最小骨架：按用户成员关系返回所在组，供权限来源可视化复用。
+    super::oss_skeleton::get_groups_for_user(org_id, user_email).await
 }
 
 #[cfg(feature = "enterprise")]
@@ -735,10 +745,11 @@ pub async fn create_group(
     )
 )]
 pub async fn create_group(
-    Path(_org_id): Path<String>,
-    Json(_user_group): Json<UserGroup>,
+    Path(org_id): Path<String>,
+    Json(user_group): Json<UserGroup>,
 ) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+    // OSS 最小骨架：开放组创建接口，支持用户和角色关系输入。
+    super::oss_skeleton::create_group(org_id, user_group).await
 }
 
 #[cfg(feature = "enterprise")]
@@ -808,10 +819,11 @@ pub async fn update_group(
     )
 )]
 pub async fn update_group(
-    Path(_path): Path<(String, String)>,
-    Json(_user_group): Json<UserGroupRequest>,
+    Path((org_id, group_name)): Path<(String, String)>,
+    Json(user_group): Json<UserGroupRequest>,
 ) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+    // OSS 最小骨架：支持组成员和组角色关系的增删更新。
+    super::oss_skeleton::update_group(org_id, group_name, user_group).await
 }
 
 #[cfg(feature = "enterprise")]
@@ -899,8 +911,9 @@ pub async fn get_groups(
         (status = 500, description = "Failure", content_type = "application/json", body = ()),
     )
 )]
-pub async fn get_groups(Path(_path): Path<String>) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+pub async fn get_groups(Path(org_id): Path<String>) -> Response {
+    // OSS 最小骨架：返回当前组织的组列表，保持与 enterprise 路由一致。
+    super::oss_skeleton::get_groups(org_id).await
 }
 
 #[cfg(feature = "enterprise")]
@@ -953,8 +966,9 @@ pub async fn get_group_details(Path((org_id, group_name)): Path<(String, String)
         (status = 500, description = "Failure", content_type = "application/json", body = ()),
     )
 )]
-pub async fn get_group_details(Path(_path): Path<(String, String)>) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+pub async fn get_group_details(Path((org_id, group_name)): Path<(String, String)>) -> Response {
+    // OSS 最小骨架：返回组详情；未命中时返回空结构，降低前端分支复杂度。
+    super::oss_skeleton::get_group_details(org_id, group_name).await
 }
 
 #[cfg(feature = "enterprise")]
@@ -1014,7 +1028,8 @@ pub async fn get_resources(Path(_org_id): Path<String>) -> Response {
     )
 )]
 pub async fn get_resources(Path(_org_id): Path<String>) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+    // OSS 最小骨架：提供基础资源字典，便于 UI 在无 enterprise 依赖时也可渲染。
+    super::oss_skeleton::get_resources().await
 }
 
 #[cfg(feature = "enterprise")]
@@ -1142,11 +1157,12 @@ pub async fn delete_group_bulk(
     )
 )]
 pub async fn delete_group_bulk(
-    Path(_path): Path<String>,
+    Path(org_id): Path<String>,
     Headers(_user_email): Headers<UserEmail>,
-    Json(_req): Json<BulkDeleteRequest>,
+    Json(req): Json<BulkDeleteRequest>,
 ) -> Response {
-    MetaHttpResponse::forbidden("Not Supported")
+    // OSS 最小骨架：开放组批量删除接口，返回统一批处理结果结构。
+    super::oss_skeleton::delete_group_bulk(org_id, req).await
 }
 
 #[cfg(not(feature = "enterprise"))]
@@ -1170,8 +1186,67 @@ pub async fn delete_group_bulk(
         (status = 500, description = "Failure", content_type = "application/json", body = ()),
     )
 )]
-pub async fn delete_group(Path(_path): Path<(String, String)>) -> Response {
+pub async fn delete_group(Path((org_id, group_name)): Path<(String, String)>) -> Response {
+    // OSS 最小骨架：删除指定组并返回兼容的成功响应。
+    super::oss_skeleton::delete_group(org_id, group_name).await
+}
+
+#[cfg(feature = "enterprise")]
+#[utoipa::path(
+    post,
+    path = "/{org_id}/authz/simulate",
+    context_path = "/api",
+    tag = "Authorization",
+    operation_id = "SimulatePermission",
+    summary = "Simulate permission decision",
+    description = "Simulates a permission decision and returns the decision chain for explainability. This endpoint is currently only available in OSS minimal mode and returns forbidden in enterprise mode.",
+    security(
+        ("Authorization"= [])
+    ),
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+    ),
+    request_body(content = inline(serde_json::Value), description = "PermissionSimulationRequest", content_type = "application/json"),
+    responses(
+        (status = 200, description = "Success", content_type = "application/json", body = Object),
+        (status = 403, description = "Not supported", content_type = "application/json", body = Object),
+    )
+)]
+/// 企业版占位：避免与当前 enterprise 能力重叠，先返回 Not Supported。
+pub async fn simulate_permissions(
+    Path(_org_id): Path<String>,
+    Json(_req): Json<serde_json::Value>,
+) -> Response {
     MetaHttpResponse::forbidden("Not Supported")
+}
+
+#[cfg(not(feature = "enterprise"))]
+#[utoipa::path(
+    post,
+    path = "/{org_id}/authz/simulate",
+    context_path = "/api",
+    tag = "Authorization",
+    operation_id = "SimulatePermission",
+    summary = "Simulate permission decision",
+    description = "Simulates a permission decision by evaluating direct role bindings, group inheritance, and role permissions. Returns a decision chain for explainability.",
+    security(
+        ("Authorization"= [])
+    ),
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+    ),
+    request_body(content = inline(super::oss_skeleton::PermissionSimulationRequest), description = "PermissionSimulationRequest", content_type = "application/json"),
+    responses(
+        (status = 200, description = "Success", content_type = "application/json", body = inline(super::oss_skeleton::PermissionSimulationResponse)),
+        (status = 500, description = "Failure", content_type = "application/json", body = ()),
+    )
+)]
+/// OSS 最小实现：根据 subject/resource/action 输出基础可解释决策链。
+pub async fn simulate_permissions(
+    Path(org_id): Path<String>,
+    Json(req): Json<super::oss_skeleton::PermissionSimulationRequest>,
+) -> Response {
+    super::oss_skeleton::simulate_permissions(org_id, req).await
 }
 
 #[cfg(test)]
@@ -1229,7 +1304,7 @@ mod tests {
             };
 
             let resp = create_role(Path("test_org".to_string()), Json(role_request)).await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1279,7 +1354,7 @@ mod tests {
         #[cfg(not(feature = "enterprise"))]
         {
             let resp = delete_role(Path(("test_org".to_string(), "test_role".to_string()))).await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1301,7 +1376,7 @@ mod tests {
         #[cfg(not(feature = "enterprise"))]
         {
             let resp = get_roles(Path("test_org".to_string())).await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1341,10 +1416,15 @@ mod tests {
         {
             let resp = update_role(
                 Path(("test_org".to_string(), "test_role".to_string())),
-                Json("test".to_string()),
+                Json(super::super::oss_skeleton::OssRoleRequest {
+                    add: vec![],
+                    remove: vec![],
+                    add_users: None,
+                    remove_users: None,
+                }),
             )
             .await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1376,7 +1456,7 @@ mod tests {
                 "test_resource".to_string(),
             )))
             .await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1400,7 +1480,7 @@ mod tests {
         {
             let resp =
                 get_users_with_role(Path(("test_org".to_string(), "test_role".to_string()))).await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1430,7 +1510,7 @@ mod tests {
                 "test@example.com".to_string(),
             )))
             .await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1460,7 +1540,7 @@ mod tests {
                 "test@example.com".to_string(),
             )))
             .await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1498,7 +1578,7 @@ mod tests {
             };
 
             let resp = create_group(Path("test_org".to_string()), Json(group)).await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1545,7 +1625,7 @@ mod tests {
                 Json(group_request),
             )
             .await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1567,7 +1647,7 @@ mod tests {
         #[cfg(not(feature = "enterprise"))]
         {
             let resp = get_groups(Path("test_org".to_string())).await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1591,7 +1671,7 @@ mod tests {
         {
             let resp =
                 get_group_details(Path(("test_org".to_string(), "test_group".to_string()))).await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1613,7 +1693,7 @@ mod tests {
         #[cfg(not(feature = "enterprise"))]
         {
             let resp = delete_group(Path(("test_org".to_string(), "test_group".to_string()))).await;
-            assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
@@ -1629,7 +1709,38 @@ mod tests {
         #[cfg(not(feature = "enterprise"))]
         {
             let resp = get_resources(Path("test_org".to_string())).await;
+            assert!(extract_status_code(&resp).is_success());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_simulate_permissions_endpoint() {
+        #[cfg(feature = "enterprise")]
+        {
+            let resp = simulate_permissions(
+                Path("test_org".to_string()),
+                Json(serde_json::json!({
+                    "subject": "test@example.com",
+                    "resource": "stream",
+                    "action": "get"
+                })),
+            )
+            .await;
             assert_eq!(extract_status_code(&resp), StatusCode::FORBIDDEN);
+        }
+
+        #[cfg(not(feature = "enterprise"))]
+        {
+            let resp = simulate_permissions(
+                Path("test_org".to_string()),
+                Json(super::super::oss_skeleton::PermissionSimulationRequest {
+                    subject: "test@example.com".to_string(),
+                    resource: "stream".to_string(),
+                    action: "get".to_string(),
+                }),
+            )
+            .await;
+            assert!(extract_status_code(&resp).is_success());
         }
     }
 
