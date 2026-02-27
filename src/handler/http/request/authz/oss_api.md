@@ -69,7 +69,13 @@
 
 - 该实现为 **内存态最小骨架**（进程重启后不会保留）。
 - 目标是保证接口契约、字段命名与 UI 接口调用先稳定。
-- 复杂策略（持久化、跨组织继承、冲突规则、deny 优先细粒度）在后续里程碑补齐。
+- 复杂策略（持久化、跨组织继承、条件表达式）在后续里程碑补齐。
+- M6 已补齐最小冲突裁决能力：`deny` 命中优先覆盖 `allow`。
+
+## M6（Issue #8）补充文档
+
+- RBAC 测试矩阵：`src/handler/http/request/authz/m6-rbac-test-matrix.md`
+- 灰度与回滚手册：`src/handler/http/request/authz/m6-authz-provider-canary-rollback.md`
 
 ## UI 接入点（本次未改 UI 代码）
 
