@@ -14,6 +14,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 pub mod action_server;
+pub mod authz_provider;
 pub mod jwt;
 pub mod token;
 pub mod validator;
